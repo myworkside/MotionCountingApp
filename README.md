@@ -3,6 +3,8 @@
 **Motion Counting App** was developed by **Sumit Mondal**.
 
 <a href="https://www.linkedin.com/in/sumitwork/">
+  <a href="https://drive.google.com/file/d/1dEzM86aSxT7Q4Ru_R1a_r7M9qLZQ0xAU/view?usp=sharing" download>Download App</a>
+
   <img src="https://img.shields.io/badge/LinkedIn-Connect-blue?style=for-the-badge&logo=linkedin" alt="Connect on LinkedIn">
 </a>
 
