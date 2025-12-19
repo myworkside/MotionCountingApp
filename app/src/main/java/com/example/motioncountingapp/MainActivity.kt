@@ -11,9 +11,13 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.objects.DetectedObject
+import com.google.mlkit.vision.objects.ObjectDetection
+import com.google.mlkit.vision.objects.defaults.ObjectDetectorOptions
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
-import kotlin.math.abs
+import kotlin.math.sqrt
 
 class MainActivity : AppCompatActivity() {
 
@@ -25,12 +29,26 @@ class MainActivity : AppCompatActivity() {
 
     private var count = 0
     private var isCounting = false
-    private var lastLuma = 0.0
+
+    private var lastX = -1f
+    private var lastY = -1f
+    private var lastCountTime = 0L
+
     private lateinit var cameraExecutor: ExecutorService
 
     companion object {
         private const val CAMERA_PERMISSION_REQUEST = 101
-        private const val THRESHOLD = 5.0 // Sensitivity: lower = more sensitive
+        private const val MOVE_THRESHOLD = 40f   // movement sensitivity
+        private const val COOLDOWN_MS = 800L     // anti double count
+    }
+
+    // ML Kit Object Detector
+    private val detector by lazy {
+        val options = ObjectDetectorOptions.Builder()
+            .setDetectorMode(ObjectDetectorOptions.STREAM_MODE)
+            .enableMultipleObjects()
+            .build()
+        ObjectDetection.getClient(options)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -50,14 +68,13 @@ class MainActivity : AppCompatActivity() {
         btnReset.setOnClickListener {
             isCounting = false
             count = 0
+            lastX = -1f
+            lastY = -1f
             counterText.text = "0"
         }
 
-        if (hasCameraPermission()) {
-            startCamera()
-        } else {
-            requestCameraPermission()
-        }
+        if (hasCameraPermission()) startCamera()
+        else requestCameraPermission()
     }
 
     private fun startCamera() {
@@ -66,63 +83,91 @@ class MainActivity : AppCompatActivity() {
         cameraProviderFuture.addListener({
             val cameraProvider = cameraProviderFuture.get()
 
-            // 1. Preview Use Case
             val preview = Preview.Builder().build().also {
                 it.setSurfaceProvider(previewView.surfaceProvider)
             }
 
-            // 2. Image Analysis Use Case (This is where counting happens)
-            val imageAnalyzer = ImageAnalysis.Builder()
+            val analysis = ImageAnalysis.Builder()
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .build()
-                .also {
-                    it.setAnalyzer(cameraExecutor) { imageProxy ->
-                        processImage(imageProxy)
-                    }
-                }
 
-            val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
-
-            try {
-                cameraProvider.unbindAll()
-                cameraProvider.bindToLifecycle(this, cameraSelector, preview, imageAnalyzer)
-            } catch (exc: Exception) {
-                // Handle binding errors
+            analysis.setAnalyzer(cameraExecutor) { imageProxy ->
+                processImage(imageProxy)
             }
 
+            cameraProvider.unbindAll()
+            cameraProvider.bindToLifecycle(
+                this,
+                CameraSelector.DEFAULT_BACK_CAMERA,
+                preview,
+                analysis
+            )
         }, ContextCompat.getMainExecutor(this))
     }
 
-    private fun processImage(image: ImageProxy) {
+    private fun processImage(imageProxy: ImageProxy) {
         if (!isCounting) {
-            image.close()
+            imageProxy.close()
             return
         }
 
-        val buffer = image.planes[0].buffer
-        val data = ByteArray(buffer.remaining())
-        buffer.get(data)
+        val mediaImage = imageProxy.image ?: run {
+            imageProxy.close()
+            return
+        }
 
-        // Simple Luma (Brightness) calculation to detect change
-        val pixels = data.map { it.toInt() and 0xFF }
-        val avgLuma = pixels.average()
+        val image = InputImage.fromMediaImage(
+            mediaImage,
+            imageProxy.imageInfo.rotationDegrees
+        )
 
-        if (abs(avgLuma - lastLuma) > THRESHOLD) {
-            count++
-            runOnUiThread {
-                counterText.text = count.toString()
+        detector.process(image)
+            .addOnSuccessListener { objects ->
+                if (objects.isNotEmpty()) {
+                    trackAndCount(objects[0])
+                }
+            }
+            .addOnCompleteListener {
+                imageProxy.close()
+            }
+    }
+
+    private fun trackAndCount(obj: DetectedObject) {
+        val box = obj.boundingBox
+        val centerX = box.centerX().toFloat()
+        val centerY = box.centerY().toFloat()
+
+        if (lastX >= 0 && lastY >= 0) {
+            val distance = calculateDistance(lastX, lastY, centerX, centerY)
+
+            val now = System.currentTimeMillis()
+            if (distance > MOVE_THRESHOLD && now - lastCountTime > COOLDOWN_MS) {
+                count++
+                lastCountTime = now
+                runOnUiThread {
+                    counterText.text = count.toString()
+                }
             }
         }
 
-        lastLuma = avgLuma
-        image.close()
+        lastX = centerX
+        lastY = centerY
     }
 
-    private fun hasCameraPermission() = ContextCompat.checkSelfPermission(
-        this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+    private fun calculateDistance(x1: Float, y1: Float, x2: Float, y2: Float): Float {
+        return sqrt((x2 - x1) * (x2 - x1) + (y2 - y1) * (y2 - y1))
+    }
+
+    private fun hasCameraPermission() =
+        ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) ==
+                PackageManager.PERMISSION_GRANTED
 
     private fun requestCameraPermission() {
-        ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.CAMERA), CAMERA_PERMISSION_REQUEST)
+        ActivityCompat.requestPermissions(
+            this,
+            arrayOf(Manifest.permission.CAMERA),
+            CAMERA_PERMISSION_REQUEST
+        )
     }
 
     override fun onDestroy() {
@@ -130,9 +175,16 @@ class MainActivity : AppCompatActivity() {
         cameraExecutor.shutdown()
     }
 
-    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == CAMERA_PERMISSION_REQUEST && grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+        if (requestCode == CAMERA_PERMISSION_REQUEST &&
+            grantResults.isNotEmpty() &&
+            grantResults[0] == PackageManager.PERMISSION_GRANTED
+        ) {
             startCamera()
         }
     }
