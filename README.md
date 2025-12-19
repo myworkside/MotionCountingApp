@@ -7,6 +7,8 @@
 
   <img src="https://img.shields.io/badge/LinkedIn-Connect-blue?style=for-the-badge&logo=linkedin" alt="Connect on LinkedIn">
 </a>
+<img src="https://drive.google.com/file/d/1dEzM86aSxT7Q4Ru_R1a_r7M9qLZQ0xAU/view?usp=sharing" alt="Download App">
+</a>
 
 If you find this project useful, please give it a star! 🌟
 📌 App Credit
